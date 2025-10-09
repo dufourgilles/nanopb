@@ -1457,6 +1457,43 @@ class Message(ProtoElement):
             else:
                 yield f
 
+    def names(self):
+        """Return (declaration, definition) strings for the tag→name map of this message."""
+        # Only real fields (expand oneofs), skip ExtensionRange
+        items = []
+        for f in self.all_fields():
+            if isinstance(f, ExtensionRange):
+                continue
+            # f.name is the original .proto field name (good for JSON keys)
+            items.append((f.tag, f.name, f.pbtype, f.ctype))
+
+        # Symbol base (like you use elsewhere, e.g. <TypeName>_msg)
+        sym = Globals.naming_style.type_name(self.name)
+
+        # Header declaration
+        decl  = 'extern const pb_tagname_t %s_tagnames[];\n' % sym
+        decl += 'extern const pb_size_t   %s_tagnames_count;\n' % sym
+
+        # C definition
+        body  = 'const pb_tagname_t %s_tagnames[] = {\n' % sym
+        for tag, nm, pbtype, ctype in items:
+            decoderFn = "NULL"
+            if pbtype == "MESSAGE":
+                decoderFn = '%s_name_for_tag' %(ctype)
+            body += '    { (pb_size_t)%d, "%s", %s },\n' % (tag, nm, decoderFn)
+        body += '};\n\n'
+        
+        body += 'const pb_size_t %s_tagnames_count = (pb_size_t)(sizeof(%s_tagnames)/sizeof(%s_tagnames[0]));\n' % (sym, sym, sym)
+
+        body += 'const pb_tagname_t* %s_name_for_tag(const pb_msgdesc_t *desc, pb_size_t tag) {\n' % sym
+        body +=  '   for (pb_size_t j = 0; j < %s_tagnames_count; ++j) {\n'  % (sym)
+        body +=  '       const pb_tagname_t* entry = &%s_tagnames[j];\n' % (sym)
+        body +=  '       if (entry->tag == tag) return entry;\n'
+        body +=  '    }\n'
+        body +=  '    return NULL;\n'
+        body +=  '}\n\n'
+
+        return decl, body
 
     def field_for_tag(self, tag):
         '''Given a tag number, return the Field instance.'''
@@ -2151,6 +2188,21 @@ class ProtoFile:
                 yield 'extern const pb_msgdesc_t %s_msg;\n' % Globals.naming_style.type_name(msg.name)
             yield '\n'
 
+             # --- Field name lookup declarations ---
+            #yield '/* Field name lookup (tag → "name") */\n'
+            #yield 'typedef struct { pb_size_t tag; const char *name; } pb_tagname_t;\n'
+            #yield 'typedef struct { const pb_msgdesc_t *desc; const pb_tagname_t *map; pb_size_t count; } pb_msg_tagmap_t;\n'
+            for msg in self.messages:
+                decl, _ = msg.names()
+                yield decl
+            # Per-file registry + lookup function prototype
+
+            # Build per-file registry: msgdesc pointer -> that message's tag map
+            
+            for msg in self.messages:
+                yield 'const pb_tagname_t* %s_name_for_tag(const pb_msgdesc_t *desc, pb_size_t tag);\n' % msg.name
+            yield '\n'
+
             yield '/* Defines for backwards compatibility with code written before nanopb-0.4.0 */\n'
             for msg in self.messages:
               yield '#define %s &%s_msg\n' % (
@@ -2289,7 +2341,9 @@ class ProtoFile:
         for msg in self.messages:
             size = msg.data_size(self.dependencies)
             if size >= 65536:
-                exceeds_64kB.append(str(msg.name))
+                exceeds_64kB.append(str(msg.name) + " "  + str(size))
+                for k in self.dependencies.keys():
+                    exceeds_64kB.append(str(k)+"\n")
 
         if exceeds_64kB:
             yield '\n/* The following messages exceed 64kB in size: ' + ', '.join(exceeds_64kB) + ' */\n'
@@ -2302,6 +2356,13 @@ class ProtoFile:
         for msg in self.messages:
             yield msg.fields_definition(self.dependencies) + '\n\n'
 
+        # --- Field name lookup (definitions) ---
+        if len(self.messages) > 0:
+            yield '/* Field name lookup (tag → "name") */\n'
+            for msg in self.messages:
+                _, body = msg.names()
+                yield body + '\n'
+        
         # Generate pb_extension_type_t definitions if extensions are used in proto file
         for ext in self.extensions:
             yield ext.extension_def(self.dependencies) + '\n'
