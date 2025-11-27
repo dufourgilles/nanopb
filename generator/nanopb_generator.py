@@ -809,6 +809,7 @@ class Field(ProtoElement):
         else:
             result = ''
         return result
+    
 
     def get_dependencies(self):
         '''Get list of type names used by this field.'''
@@ -1235,6 +1236,7 @@ class OneOf(Field):
     def types(self):
         return ''.join([f.types() for f in self.fields])
 
+
     def get_dependencies(self):
         deps = []
         for f in self.fields:
@@ -1248,7 +1250,12 @@ class OneOf(Field):
             return '0, {' + self.fields[0].get_initializer(null_init) + '}'
 
     def tags(self):
-        return ''.join([f.tags() for f in self.fields])
+        if len(self.fields) == 0:
+            return ''
+        identifier = Globals.naming_style.define_name('%s_%s_tag' % (self.struct_name, self.name))
+        tags = '#define %-40s %d\n' % (identifier, self.fields[0].tag)
+        tags += ''.join([f.tags() for f in self.fields])
+        return tags
 
     def data_size(self, dependencies):
         return max(f.data_size(dependencies) for f in self.fields)
@@ -1427,6 +1434,16 @@ class Message(ProtoElement):
 
         return result + '\n'
 
+    def offsets(self):
+        struct_name = Globals.naming_style.type_name(self.name)
+        result = ''
+        result += 'const size_t ' + struct_name + '_offset[] = {\n'
+        result += '   0x0, // element should start at #1 - ignore index 0\n'
+        for f in self.fields:
+            result += '   offsetof(' + struct_name + ", " + Globals.naming_style.var_name(f.name) + '),\n'
+        result += '   0xDEADDEAD\n};\n'
+        return result
+        
     def types(self):
         return ''.join([f.types() for f in self.fields])
 
@@ -2136,6 +2153,12 @@ class ProtoFile:
                 yield str(msg) + '\n'
             yield '\n'
 
+            yield '/* Table offset declaration*/\n'
+            for msg in sort_dependencies(self.messages):
+                yield 'extern const size_t ' + Globals.naming_style.type_name(msg.name) + '_offset[];\n'
+                yield '#define ' + Globals.naming_style.type_name(msg.name) + '_offset_count ' + str(len(msg.fields) + 1) + '\n'
+            yield '\n\n'
+
         if self.extensions:
             yield '/* Extensions */\n'
             for extension in self.extensions:
@@ -2157,26 +2180,28 @@ class ProtoFile:
 
         if self.messages:
             yield '/* Initializer values for message structs */\n'
-            for msg in self.messages:
-                identifier = Globals.naming_style.define_name('%s_init_default' % msg.name)
-                yield '#define %-40s %s\n' % (identifier, msg.get_initializer(False))
-                unmangledName = self.manglenames.unmangle(msg.name)
-                if unmangledName:
-                    unmangledIdentifier = Globals.naming_style.define_name('%s_init_default' % unmangledName)
-                    self.manglenames.reverse_name_mapping[identifier] = unmangledIdentifier
-            for msg in self.messages:
-                identifier = Globals.naming_style.define_name('%s_init_zero' % msg.name)
-                yield '#define %-40s %s\n' % (identifier, msg.get_initializer(True))
-                unmangledName = self.manglenames.unmangle(msg.name)
-                if unmangledName:
-                    unmangledIdentifier = Globals.naming_style.define_name('%s_init_zero' % unmangledName)
-                    self.manglenames.reverse_name_mapping[identifier] = unmangledIdentifier
-            yield '\n'
+            if 0: # skip it as it generates use content
+                for msg in self.messages:
+                    identifier = Globals.naming_style.define_name('%s_init_default' % msg.name)
+                    yield '#define %-40s %s\n' % (identifier, msg.get_initializer(False))
+                    unmangledName = self.manglenames.unmangle(msg.name)
+                    if unmangledName:
+                        unmangledIdentifier = Globals.naming_style.define_name('%s_init_default' % unmangledName)
+                        self.manglenames.reverse_name_mapping[identifier] = unmangledIdentifier
+                for msg in self.messages:
+                    identifier = Globals.naming_style.define_name('%s_init_zero' % msg.name)
+                    yield '#define %-40s %s\n' % (identifier, msg.get_initializer(True))
+                    unmangledName = self.manglenames.unmangle(msg.name)
+                    if unmangledName:
+                        unmangledIdentifier = Globals.naming_style.define_name('%s_init_zero' % unmangledName)
+                        self.manglenames.reverse_name_mapping[identifier] = unmangledIdentifier
+                yield '\n'
 
             yield '/* Field tags (for use in manual encoding/decoding) */\n'
             for msg in sort_dependencies(self.messages):
                 for field in msg.fields:
                     yield field.tags()
+
             for extension in self.extensions:
                 yield extension.tags()
             yield '\n'
@@ -2338,13 +2363,18 @@ class ProtoFile:
 
         # Check if any messages exceed the 64 kB limit of 16-bit pb_size_t
         exceeds_64kB = []
+        yield '/*\n'
         for msg in self.messages:
             size = msg.data_size(self.dependencies)
+            
+            for f in msg.fields:
+                yield 'size info: ' + str(f).replace("*/", "") + ' ' + str(f.data_size(self.dependencies)) + '\n'
+            
             if size >= 65536:
                 exceeds_64kB.append(str(msg.name) + " "  + str(size))
                 for k in self.dependencies.keys():
-                    exceeds_64kB.append(str(k)+"\n")
-
+                    exceeds_64kB.append(str(k)+ ":" + "\n")
+        yield '*/\n'
         if exceeds_64kB:
             yield '\n/* The following messages exceed 64kB in size: ' + ', '.join(exceeds_64kB) + ' */\n'
             yield '\n/* The PB_FIELD_32BIT compilation option must be defined to support messages that exceed 64 kB in size. */\n'
@@ -2355,6 +2385,7 @@ class ProtoFile:
         # Generate the message field definitions (PB_BIND() call)
         for msg in self.messages:
             yield msg.fields_definition(self.dependencies) + '\n\n'
+            yield msg.offsets() + '\n\n'
 
         # --- Field name lookup (definitions) ---
         if len(self.messages) > 0:
